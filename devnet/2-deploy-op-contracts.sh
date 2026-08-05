@@ -58,6 +58,7 @@ deploy_transactor() {
         -w /app/packages/contracts-bedrock \
         "${OP_CONTRACTS_IMAGE_TAG}" \
         forge create --json --broadcast --legacy \
+          -e FOUNDRY_FORCE=true \
           --rpc-url $L1_RPC_URL_IN_DOCKER \
           --private-key $DEPLOYER_PRIVATE_KEY \
           "src/periphery/Transactor.sol:Transactor" \
