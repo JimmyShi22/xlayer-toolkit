@@ -51,20 +51,6 @@ deploy_safe() {
 deploy_transactor() {
     echo "=== Deploying Transactor ==="
 
-    # Resolve the artifact name instead of hardcoding it. forge names artifacts
-    # <contract>.<solc version>.json (and writes no plain <contract>.json) whenever a
-    # contract is compiled by more than one solc version.
-    TRANSACTOR_ARTIFACT=$(docker run --rm \
-        -w /app/packages/contracts-bedrock \
-        --entrypoint sh "${OP_CONTRACTS_IMAGE_TAG}" -c \
-        'ls forge-artifacts/Transactor.sol/*.json | xargs -n1 basename | sed "s/\.json$//" | sort -V | tail -1')
-
-    if [ -z "$TRANSACTOR_ARTIFACT" ]; then
-        echo "❌ No Transactor artifact in ${OP_CONTRACTS_IMAGE_TAG} (forge-artifacts/Transactor.sol/)"
-        exit 1
-    fi
-    echo " ✅ Using Transactor artifact: $TRANSACTOR_ARTIFACT"
-
     # Execute Transactor deployment using forge create (original method)
     TRANSACTOR_DEPLOY_OUTPUT=$(docker run --rm \
         --network "$DOCKER_NETWORK" \
@@ -74,7 +60,7 @@ deploy_transactor() {
         forge create --json --broadcast --legacy \
           --rpc-url $L1_RPC_URL_IN_DOCKER \
           --private-key $DEPLOYER_PRIVATE_KEY \
-          "src/periphery/Transactor.sol:$TRANSACTOR_ARTIFACT" \
+          "src/periphery/Transactor.sol:Transactor" \
           --constructor-args $ADMIN_OWNER_ADDRESS)
 
     # Extract Transactor address
