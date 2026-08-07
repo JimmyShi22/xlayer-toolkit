@@ -2,17 +2,22 @@
 
 set -e
 
-source /.env
+ENV_FILE="${ENV_FILE:-/.env}"
+[ -f "$ENV_FILE" ] || { echo "Missing Reth environment file: $ENV_FILE" >&2; exit 1; }
+# shellcheck disable=SC1090
+source "$ENV_FILE"
 
-# Drop our own enode from the (shared) trusted-peers list so this node does not
-# dial itself. trusted-peers.sh emits one list containing every reth node's
-# enode and both the seq and rpc entrypoints consume it; combined with
-# --disable-discovery each node dials exactly that list, so without this filter
-# the node connects to itself (noisy "already connected" churn in the logs).
-OWN_P2P_HOST="op-${RPC_TYPE}-rpc"
+# Each generated RPC node has its own suffix and enode. The identity file is
+# absent only for the legacy single-node invocation.
+if [ -f /identity.env ]; then
+    source /identity.env
+fi
+
+# Do not include this RPC node's enode in the generated trusted-peer dial list.
+OWN_P2P_HOST="op-${RPC_TYPE}-rpc${SUFFIX:-}"
 _filtered=""
 _OLDIFS="$IFS"; IFS=','
-for _peer in $TRUSTED_PEERS; do
+for _peer in ${TRUSTED_PEERS:-}; do
     [ -z "$_peer" ] && continue
     case "$_peer" in *"@${OWN_P2P_HOST}:"*) continue ;; esac
     _filtered="${_filtered:+$_filtered,}$_peer"
@@ -36,18 +41,17 @@ else
     CHAIN="/genesis.json"
 fi
 
-# Build storage flags
-RETH_INIT_STORAGE_FLAGS=""
+# Probe once and reuse the same capability inventory for storage and optional
+# XLayer/gasless flags.
+RETH_NODE_HELP="$(op-reth node --help 2>/dev/null || true)"
+
+# Build storage flags compatible with both storage-v1 and storage-v2 Reth.
+RETH_STORAGE_FLAGS=""
 if [ "${RETH_STORAGE_V2:-false}" = "true" ]; then
-    if [ -n "${RETH_ROCKSDB_PATH:-}" ]; then
-        RETH_INIT_STORAGE_FLAGS="$RETH_INIT_STORAGE_FLAGS --datadir.rocksdb=$RETH_ROCKSDB_PATH"
-    fi
+    [ -n "${RETH_ROCKSDB_PATH:-}" ] && RETH_STORAGE_FLAGS="--datadir.rocksdb=$RETH_ROCKSDB_PATH"
 else
-    # Opt out of storage v2 only if this op-reth build exposes the flag. The
-    # xlayer gasless reth build has no --storage.v2 and would abort with
-    # "unexpected argument '--storage.v2'".
-    if op-reth node --help 2>/dev/null | grep -q -- '--storage.v2'; then
-        RETH_INIT_STORAGE_FLAGS="--storage.v2=false"
+    if grep -q -- '--storage.v2' <<<"$RETH_NODE_HELP"; then
+        RETH_STORAGE_FLAGS="--storage.v2=false"
     fi
 fi
 
@@ -60,7 +64,7 @@ CMD="op-reth node \
       --datadir=/datadir \
       --chain=$CHAIN \
       --config=/config.toml \
-      $RETH_INIT_STORAGE_FLAGS \
+      $RETH_STORAGE_FLAGS \
       --http \
       --http.corsdomain=* \
       --http.port=8545 \
@@ -85,39 +89,32 @@ CMD="op-reth node \
       --txpool.max-pending-txns=100000 \
       --txpool.max-new-txns=100000 \
       --rpc.eth-proof-window=10000 \
-      --rpc.legacy-url=http://l1-geth:8545"
+      --rpc.legacy-url=http://l1-geth:8545 \
+      --log.file.directory=/logs/reth \
+      --log.file.filter=info \
+      --metrics=0.0.0.0:9001"
 
-# Only pass --trusted-peers if any remain after removing our own enode (an empty
-# --trusted-peers= would be rejected).
 if [ -n "$TRUSTED_PEERS" ]; then
     CMD="$CMD --trusted-peers=$TRUSTED_PEERS"
 fi
 
-# Enable XLayer gasless` flag to forward gasless txs to sequencer node.
 if [ "${ENABLE_GASLESS:-false}" = "true" ]; then
     CMD="$CMD --rollup.allow-gasless"
 fi
 
-# Gasless tuning flags only exist on newer op-reth builds; apply each only if the
-# binary advertises it (older builds abort on an unknown argument). --help is
-# evaluated once and reused.
-RETH_NODE_HELP="$(op-reth node --help 2>/dev/null || true)"
-if echo "$RETH_NODE_HELP" | grep -q -- '--rollup.gasless-mock-gas-price-percentile'; then
+if grep -q -- '--rollup.gasless-mock-gas-price-percentile' <<<"$RETH_NODE_HELP"; then
     CMD="$CMD --rollup.gasless-mock-gas-price-percentile=${GASLESS_MOCK_GAS_PRICE_PERCENTILE:-0.1}"
 fi
-if echo "$RETH_NODE_HELP" | grep -q -- '--rollup.gasless-pending-lifetime'; then
+if grep -q -- '--rollup.gasless-pending-lifetime' <<<"$RETH_NODE_HELP"; then
     CMD="$CMD --rollup.gasless-pending-lifetime=${GASLESS_PENDING_LIFETIME_SECS:-600}"
 fi
-if echo "$RETH_NODE_HELP" | grep -q -- '--builder.gasless-block-gas-limit'; then
+if grep -q -- '--builder.gasless-block-gas-limit' <<<"$RETH_NODE_HELP"; then
     CMD="$CMD --builder.gasless-block-gas-limit=${BUILDER_GASLESS_BLOCK_GAS_LIMIT:-60000000}"
 fi
 
 # For flashblocks architecture. Enable flashblocks RPC
 if [ "$FLASHBLOCK_ENABLED" = "true" ] && [ "$FLASHBLOCKS_RPC" = "true" ]; then
-    # The flashblocks subscription URL flag was renamed across op-reth versions:
-    # older builds expose --flashblocks-url, newer xlayer-reth uses
-    # --xlayer.flashblocks-url. Pick whichever this binary actually supports.
-    if op-reth node --help 2>/dev/null | grep -q -- '--xlayer.flashblocks-url'; then
+    if grep -q -- '--xlayer.flashblocks-url' <<<"$RETH_NODE_HELP"; then
         FB_URL_FLAG="--xlayer.flashblocks-url"
     else
         FB_URL_FLAG="--flashblocks-url"
@@ -125,7 +122,7 @@ if [ "$FLASHBLOCK_ENABLED" = "true" ] && [ "$FLASHBLOCKS_RPC" = "true" ]; then
     CMD="$CMD \
         --flashblocks.addr=0.0.0.0 \
         --flashblocks.port=1111 \
-        $FB_URL_FLAG=ws://op-reth-seq:1111 \
+        $FB_URL_FLAG=$FB_URL \
         --xlayer.flashblocks-subscription"
 
     # Enable flashblocks state comparison debug mode

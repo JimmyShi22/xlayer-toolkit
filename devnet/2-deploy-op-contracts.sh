@@ -58,7 +58,7 @@ deploy_transactor() {
         -w /app/packages/contracts-bedrock \
         "${OP_CONTRACTS_IMAGE_TAG}" \
         forge create --json --broadcast --legacy \
-          -e FOUNDRY_FORCE=true \
+          --force \
           --rpc-url $L1_RPC_URL_IN_DOCKER \
           --private-key $DEPLOYER_PRIVATE_KEY \
           "src/periphery/Transactor.sol:Transactor" \
@@ -83,6 +83,7 @@ deploy_transactor() {
 
 ROOT_DIR=$(git rev-parse --show-toplevel)
 PWD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$PWD_DIR/scripts/lib/op-contracts.sh"
 
 cd $PWD_DIR
 
@@ -196,18 +197,16 @@ sed_inplace "s/faultGameClockExtension = .*/faultGameClockExtension = $TEMP_CLOC
 sed_inplace "s/faultGameMaxClockDuration = .*/faultGameMaxClockDuration = $TEMP_MAX_CLOCK_DURATION/" "$CONFIG_DIR/intent.toml"
 echo " ✅ Updated clock parameters in intent.toml: clockExtension=$TEMP_CLOCK_EXTENSION, maxClockDuration=$TEMP_MAX_CLOCK_DURATION"
 
-# Read opcmV2Address from implementations.json and write it into intent.toml.
-# In op-deployer v2.1.0+, the Solidity DeployImplementations script no longer populates
-# the legacy "opcmAddress" (OPCM v1) output field - it is always zero. The active OPCM
-# contract is "opcmV2Address". Intent.toml's opcmAddress field maps to Intent.OPCMAddress
-# which the apply pipeline uses to resolve the pre-deployed OPCM v2 contract.
-OPCM_ADDRESS=$(jq -r '.opcmV2Address' ./config-op/implementations.json)
-if [ -z "$OPCM_ADDRESS" ] || [ "$OPCM_ADDRESS" = "null" ] || [ "$OPCM_ADDRESS" = "0x0000000000000000000000000000000000000000" ]; then
-  echo " ❌ Failed to read opcmV2Address from implementations.json (got: $OPCM_ADDRESS)"
+# Newer op-deployer images populate opcmV2Address and leave the legacy
+# opcmAddress empty. Older XLayer/TEE images do the inverse. Prefer OPCM v2,
+# but retain compatibility with a validated nonzero legacy OPCM.
+if ! OPCM_ADDRESS=$(select_opcm_address ./config-op/implementations.json); then
+  echo " ❌ implementations.json contains no valid OPCM v2 or legacy address"
   exit 1
 fi
 
-# Replace the opcmAddress field in intent.toml with the OPCM v2 address.
+# Intent.toml always calls this field opcmAddress, regardless of the selected
+# manager contract version.
 sed_inplace "s/^opcmAddress = \".*\"/opcmAddress = \"$OPCM_ADDRESS\"/" ./config-op/intent.toml
 echo " ✅ Updated opcmAddress ($OPCM_ADDRESS) in intent.toml"
 

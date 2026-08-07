@@ -109,7 +109,7 @@ RPC_TIMEOUT_S: 10
 CONDUCTOR1_URL: "http://localhost:8547"
 SEQUENCER1_URL: "http://localhost:8123"
 CONDUCTOR2_URL: "http://localhost:8548"
-SEQUENCER2_URL: "http://localhost:8223"
+SEQUENCER2_URL: "http://localhost:8124"
 
 # Peer status poll interval (seconds)
 PEER_STATUS_POLL_INTERVAL_S: 5
@@ -119,6 +119,45 @@ VERBOSE: false
 ```
 
 All config options can be overridden with environment variables of the same name, e.g. `WS_URL=ws://xxx ./flashblocks-monitor`.
+
+### Devnet-generated conductor endpoints
+
+Do not infer conductor or sequencer ports from a configured count. After
+`devnet/3-op-init.sh`, source the generated endpoint inventory instead:
+
+```bash
+cd devnet
+source config-op/cluster/cluster.env
+cd ../tools/flashblocks-monitoring
+
+CONDUCTOR1_URL="http://127.0.0.1:${CONDUCTOR_RPC_PORT_1}" \
+SEQUENCER1_URL="http://127.0.0.1:${EL_HTTP_PORT_1}" \
+CONDUCTOR2_URL="http://127.0.0.1:${CONDUCTOR_RPC_PORT_2}" \
+SEQUENCER2_URL="http://127.0.0.1:${EL_HTTP_PORT_2}" \
+./flashblocks-monitor
+```
+
+This command is for a conductor cluster with at least two effective
+sequencers. `cluster.env` is the source of truth and also exposes
+`SEQ_EFFECTIVE_COUNT`, `RPC_EFFECTIVE_COUNT`, `SEQ_CL_EFFECTIVE`, and
+`RPC_CL_EFFECTIVE` for wrappers that choose their monitor configuration.
+
+> **Important:** the bundled `cfg.yml` and the fallback defaults in
+> `config.go` still use the upstream `SEQUENCER2_URL=http://localhost:8223`.
+> In the generated topology that is RPC node 1, not sequencer 2. A plain
+> `./flashblocks-monitor` invocation therefore does not monitor generated
+> sequencer 2. Use the `cluster.env` overrides above or edit the monitor YAML
+> to the generated endpoints before running it.
+
+The current monitor parses exactly `CONDUCTOR1_URL`/`SEQUENCER1_URL` and
+`CONDUCTOR2_URL`/`SEQUENCER2_URL`. A cluster with more than two conductors is
+supported by the devnet, but one monitor instance does not audit every leader
+candidate; run separately configured monitor instances with YAML configurations
+that select the remaining pairs, or extend the monitor
+before treating it as full-cluster coverage. This two-pair parser limit is
+upstream/pre-existing and was not changed by the dynamic topology work. A
+no-Conductor topology has no conductor-leader endpoint, so its peer-status
+monitor should not be used.
 
 ## Data Flow
 
@@ -412,7 +451,7 @@ go build -o flashblocks-monitor .
 WS_URL=ws://127.0.0.1:8546 VERBOSE=true ./flashblocks-monitor
 
 # Run Peer Status Monitor only (Alert 6/7/8), skip WS monitoring (Alert 1-5)
-WS_URL="" CONDUCTOR1_URL="http://localhost:8547" SEQUENCER1_URL="http://localhost:8123" CONDUCTOR2_URL="http://localhost:8548" SEQUENCER2_URL="http://localhost:8223" ./flashblocks-monitor
+WS_URL="" CONDUCTOR1_URL="http://localhost:8547" SEQUENCER1_URL="http://localhost:8123" CONDUCTOR2_URL="http://localhost:8548" SEQUENCER2_URL="http://localhost:8124" ./flashblocks-monitor
 ```
 
 ## Docker

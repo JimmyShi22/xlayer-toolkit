@@ -1,6 +1,16 @@
 #!/bin/bash
 set -e
+set -a
 source .env
+set +a
+
+# .env's COMPOSE_FILE references docker-compose.cluster.yml, which is only
+# generated later by 3-op-init.sh. This is the first script in the pipeline
+# to call `docker compose`, so generate it now if it doesn't exist yet —
+# 3-op-init.sh will regenerate it with real values once it runs.
+if [ ! -f docker-compose.cluster.yml ]; then
+    ./scripts/generate-cluster.sh
+fi
 
 # Build alpine image with jq pre-installed (avoids slow apk add on every run)
 docker build -t alpine-jq:local - <<'EOF'

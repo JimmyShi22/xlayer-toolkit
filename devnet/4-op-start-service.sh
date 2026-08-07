@@ -4,6 +4,8 @@ set -x
 
 # Load environment variables early
 source .env
+# shellcheck source=scripts/lib/reth-init.sh
+source ./scripts/lib/reth-init.sh
 
 sed_inplace() {
   if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -13,60 +15,21 @@ sed_inplace() {
   fi
 }
 
-wait_for_el_to_start() {
-    CONTAINER_NAME=$1
-    EL_TYPE=${2:-reth}
-    if [ -z "$CONTAINER_NAME" ]; then
-        echo "Error: CONTAINER_NAME is not set"
-        exit 1
-    fi
-
-    # reth: "Starting consensus engine", geth: "HTTP server started"
-    if [ "$EL_TYPE" = "geth" ]; then
-        READY_LOG="HTTP server started"
-    else
-        READY_LOG="Starting consensus engine"
-    fi
-
-    # Wait for execution layer to start
-    echo "⏳ Waiting for execution layer to start in ${CONTAINER_NAME} ..."
-    MAX_WAIT=300  # 5 minutes timeout
-    ELAPSED=0
-    FOUND=false
-
-    while [ $ELAPSED -lt $MAX_WAIT ]; do
-        if docker logs ${CONTAINER_NAME} 2>&1 | grep -q "$READY_LOG"; then
-            echo "✅ Execution layer started!"
-            FOUND=true
-            break
-        fi
-        sleep 2
-        ELAPSED=$((ELAPSED + 2))
-        if [ $((ELAPSED % 10)) -eq 0 ]; then
-            echo "   Still waiting... (${ELAPSED}s/${MAX_WAIT}s)"
-        fi
-    done
-
-    if [ "$FOUND" = false ]; then
-        echo "❌ Error: Timeout waiting for execution layer to start (${MAX_WAIT}s)"
-        exit 1
-    fi
-}
-
 PWD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR=$PWD_DIR/scripts
+source config-op/cluster/cluster.env
+
+# Establish every selected EL container/DNS identity up front, but start only
+# Sequencer ELs until the Sequencer/Conductor cluster is active.
+"$SCRIPTS_DIR/start-cluster-services.sh" prepare
+"$SCRIPTS_DIR/start-cluster-services.sh" seq-el
 
 if [ "$SEQ_TYPE" = "geth" ]; then
-    # Start op-geth-seq to get the block hash at FORK_BLOCK+1
-    echo "🚀 Starting op-geth-seq to get block hash at FORK_BLOCK+1..."
-    docker compose up -d op-geth-seq
-    sleep 5
-
     # Get the block hash at FORK_BLOCK+1
     TARGET_BLOCK=$((FORK_BLOCK + 1))
     echo "⏳ Waiting for block height to reach $TARGET_BLOCK..."
     while true; do
-        CURRENT_BLOCK=$(cast bn -r http://localhost:8123 2>/dev/null || echo "0")
+        CURRENT_BLOCK=$(cast bn -r "http://localhost:${EL_HTTP_PORT_1}" 2>/dev/null || echo "0")
         if [ "$CURRENT_BLOCK" -ge "$TARGET_BLOCK" ]; then
             echo "ok"
             break
@@ -75,10 +38,10 @@ if [ "$SEQ_TYPE" = "geth" ]; then
         sleep 1
     done
 
-    NEW_BLOCK_HASH=$(cast block $TARGET_BLOCK -r http://localhost:8123 --json | jq -r .hash)
+    NEW_BLOCK_HASH=$(cast block "$TARGET_BLOCK" -r "http://localhost:${EL_HTTP_PORT_1}" --json | jq -r .hash)
     echo "New block hash: $NEW_BLOCK_HASH"
-    if [ -z "$NEW_BLOCK_HASH" ] || [ "$NEW_BLOCK_HASH" = "null" ] || [ "$NEW_BLOCK_HASH" = "undefined" ]; then
-        echo " ❌ Failed to get block hash at block $TARGET_BLOCK"
+    if ! validate_bytes32 "$NEW_BLOCK_HASH"; then
+        echo " ❌ Failed to get a non-null bytes32 block hash at block $TARGET_BLOCK"
         exit 1
     fi
 
@@ -86,8 +49,8 @@ if [ "$SEQ_TYPE" = "geth" ]; then
     sed_inplace "s/NEW_BLOCK_HASH=.*/NEW_BLOCK_HASH=$NEW_BLOCK_HASH/" .env
 else
     echo "✅ Using existing NEW_BLOCK_HASH from .env for reth mode"
-    if [ -z "$NEW_BLOCK_HASH" ]; then
-        echo "❌ NEW_BLOCK_HASH is not set in .env for reth mode"
+    if ! validate_bytes32 "${NEW_BLOCK_HASH:-}"; then
+        echo "❌ NEW_BLOCK_HASH must be a non-null bytes32 in .env for reth mode"
         exit 1
     fi
     echo "New block hash: $NEW_BLOCK_HASH"
@@ -97,98 +60,32 @@ fi
 jq ".genesis.l2.hash = \"$NEW_BLOCK_HASH\"" config-op/rollup.json > config-op/rollup.json.tmp
 mv config-op/rollup.json.tmp config-op/rollup.json
 
-if [ "$CONDUCTOR_ENABLED" = "true" ]; then
-    docker compose up -d op-conductor op-conductor2 op-conductor3
-    sleep 10
-    $SCRIPTS_DIR/active-sequencer.sh
-else
-    docker compose up -d op-${SEQ_TYPE}-seq
-    wait_for_el_to_start "op-${SEQ_TYPE}-seq" "$SEQ_TYPE"
-    if [ "$SEQ_CL" = "kona" ]; then
-        echo "🚀 Starting kona-node as CL (SEQ_CL=kona)"
-        docker compose up -d op-kona-seq
-    else
-        docker compose up -d op-seq
-    fi
-fi
+# Start Sequencer CLs only after the rollup hash is valid, then wait for every
+# Conductor RPC plus a leader election before activating a Sequencer.
+"$SCRIPTS_DIR/start-cluster-services.sh" seq-cl
+"$SCRIPTS_DIR/start-cluster-services.sh" conductors
+"$SCRIPTS_DIR/start-cluster-services.sh" activate
 
 sleep 5
 
-# Start monitoring stack (Prometheus + Grafana) after op-reth is up
-echo "🚀 Starting monitoring stack (Prometheus + Grafana)..."
-# Pre-create the bind-mounted monitoring data dirs owned by the container uids.
-MONITOR_INIT_IMAGE="${OP_RETH_IMAGE_TAG:-alpine}"
-docker run --rm --user 0:0 -v "$(pwd)/data:/data" --entrypoint sh "$MONITOR_INIT_IMAGE" -c '
-  mkdir -p /data/grafana /data/prometheus &&
-  chown 472:472 /data/grafana &&
-  chown 65534:65534 /data/prometheus
-' || echo " ⚠️  could not pre-chown monitoring data dirs; grafana/prometheus may fail on permissions"
-docker compose up -d prometheus grafana
-echo "✅ Grafana available at http://localhost:3000 (admin/admin)"
+# Preserve upstream side-service ordering, then start RPC ELs and selected CLs.
+"$SCRIPTS_DIR/start-cluster-services.sh" monitoring
+"$SCRIPTS_DIR/start-cluster-services.sh" rpc-el
+"$SCRIPTS_DIR/start-cluster-services.sh" rpc-cl
 
 #$SCRIPTS_DIR/add-peers.sh
 
-if [ "$LAUNCH_RPC_NODE" = "true" ]; then
-    docker compose up -d op-${RPC_TYPE}-rpc
-    wait_for_el_to_start "op-${RPC_TYPE}-rpc" "$RPC_TYPE"
-    # Only needed when the sequencer runs trusted_nodes_only=true: it was started
-    # above, before this RPC node's container existed, so at boot it couldn't
-    # resolve the RPC node's hostname. reth >=2.2 only adds a trusted peer to its
-    # inbound-allow set when it resolves at startup, and with trusted_nodes_only=true
-    # it then rejects the (untrusted) replica's inbound connection — so the replica
-    # can never peer or sync. Now that op-${RPC_TYPE}-rpc is up, restart the sequencer
-    # so its startup trusted-peer resolution succeeds and it trusts the replica. (Its
-    # periodic re-resolver would not reliably add it to the inbound-allow set.)
-    # With trusted_nodes_only=false the seq accepts the untrusted inbound anyway, so
-    # the restart is skipped.
-    if [ "${TRUSTED_NODES_ONLY:-true}" = "true" ] && [ "$SEQ_TYPE" = "reth" ] && [ "$RPC_TYPE" = "reth" ]; then
-        echo "🔄 Restarting op-${SEQ_TYPE}-seq so it resolves and trusts op-${RPC_TYPE}-rpc..."
-        docker compose restart op-${SEQ_TYPE}-seq
-        wait_for_el_to_start "op-${SEQ_TYPE}-seq" "$SEQ_TYPE"
-    fi
-    if [ "$RPC_CL" = "kona" ]; then
-        echo "🚀 Starting kona-node as RPC CL (RPC_CL=kona)"
-        docker compose up -d op-kona-rpc
-    else
-        docker compose up -d op-rpc
-    fi
+if [ "${RPC_CL_EFFECTIVE:-opnode}" = "kona" ] && [ -n "${KONA_RPC_URLS:-}" ]; then
+    "$SCRIPTS_DIR"/kona-connect-peer.sh $KONA_RPC_URLS
 fi
 
-if [ "$LAUNCH_RPC_NODE2" = "true" ]; then
-    if [ "$RPC_CL" = "kona" ]; then
-        docker compose up -d op-kona-rpc2
-    else
-        docker compose up -d op-rpc2
-    fi
-fi
-
-if [ "$RPC_CL" = "kona" ]; then
-    URLS=()
-    [ "$LAUNCH_RPC_NODE" = "true" ] && URLS+=(http://localhost:9555)
-    [ "$LAUNCH_RPC_NODE2" = "true" ] && URLS+=(http://localhost:9565)
-    if [ ${#URLS[@]} -gt 0 ]; then
-        $SCRIPTS_DIR/kona-connect-peer.sh "${URLS[@]}"
-    fi
-fi
-
-# Configure op-batcher endpoints based on conductor mode
-if [ "$CONDUCTOR_ENABLED" = "true" ]; then
-    echo "🔧 Configuring op-batcher for conductor mode with conductor RPC endpoints..."
-    # Set conductor mode endpoints
-    export OP_BATCHER_L2_ETH_RPC="http://op-conductor:8547,http://op-conductor2:8547,http://op-conductor3:8547"
-    export OP_BATCHER_ROLLUP_RPC="http://op-conductor:8547,http://op-conductor2:8547,http://op-conductor3:8547"
-    echo "✅ op-batcher configured for conductor mode (connecting to conductor RPC endpoints)"
-else
-    echo "🔧 Configuring op-batcher for single sequencer mode..."
-    # Set single sequencer mode endpoints
-    export OP_BATCHER_L2_ETH_RPC="http://op-${SEQ_TYPE}-seq:8545"
-    if [ "$SEQ_CL" = "kona" ]; then
-        export OP_BATCHER_ROLLUP_RPC="http://op-kona-seq:9545"
-    else
-        export OP_BATCHER_ROLLUP_RPC="http://op-seq:9545"
-    fi
-    echo "✅ op-batcher configured for single sequencer mode (CL=${SEQ_CL:-opnode})"
-fi
+# OP_BATCHER_L2_ETH_RPC / OP_BATCHER_ROLLUP_RPC are computed by
+# scripts/generate-cluster-identities.sh (run inside 3-op-init.sh) and
+# written to config-op/cluster/cluster.env.
+source config-op/cluster/cluster.env
+export OP_BATCHER_L2_ETH_RPC
+export OP_BATCHER_ROLLUP_RPC
+echo "✅ op-batcher configured for $([ "$CONDUCTOR_ENABLED" = "true" ] && echo "conductor" || echo "single-sequencer") mode: $OP_BATCHER_L2_ETH_RPC"
 
 docker compose up -d op-batcher
 

@@ -4,7 +4,14 @@
 # Repeatedly stops the current leader's conductor+sequencer to trigger failover.
 
 max_runs=${1:-0}  # 0 = unlimited
-BASE_PORT=8547
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CLUSTER_ENV_PATH="${CLUSTER_ENV_PATH:-$(dirname "$SCRIPT_DIR")/config-op/cluster/cluster.env}"
+[ -f "$CLUSTER_ENV_PATH" ] || { echo "❌ Missing generated cluster environment: $CLUSTER_ENV_PATH" >&2; exit 1; }
+# shellcheck disable=SC1090
+source "$CLUSTER_ENV_PATH"
+# shellcheck source=scripts/lib/cluster-services.sh
+source "$SCRIPT_DIR/lib/cluster-services.sh"
+require_conductor_utility_topology test_transfer_leader
 count=0
 
 if [ "$max_runs" -gt 0 ]; then
@@ -24,14 +31,15 @@ while true; do
     # --- Step 1: Find current leader ---
     LEADER_PORT=0
     OLD_LEADER=0
-    for i in {0..2}; do
-        PORT=$((BASE_PORT + i))
+    for ((i = 1; i <= SEQ_EFFECTIVE_COUNT; i++)); do
+        PORT_VAR="CONDUCTOR_RPC_PORT_$i"
+        PORT="${!PORT_VAR}"
         IS_LEADER=$(curl -s -X POST -H "Content-Type: application/json" \
             --data '{"jsonrpc":"2.0","method":"conductor_leader","params":[],"id":1}' \
             http://localhost:$PORT 2>/dev/null | jq -r .result)
         if [ "$IS_LEADER" = "true" ]; then
             LEADER_PORT=$PORT
-            OLD_LEADER=$((i+1))
+            OLD_LEADER=$i
             break
         fi
     done
@@ -42,12 +50,7 @@ while true; do
         continue
     fi
 
-    # Map leader to container names (all using reth)
-    if [ "$OLD_LEADER" = "1" ]; then
-        SEQ_CONTAINER="op-reth-seq"
-    else
-        SEQ_CONTAINER="op-reth-seq${OLD_LEADER}"
-    fi
+    SEQ_CONTAINER=$(selected_seq_el_service "$OLD_LEADER")
     echo "  Current leader: $OLD_LEADER ($SEQ_CONTAINER)"
 
     # --- Step 2: Stop leader's containers to trigger failover ---
@@ -64,20 +67,20 @@ while true; do
     MAX_WAIT=15
     for ((s=1; s<=MAX_WAIT; s++)); do
         sleep 0.5
-        for i in {0..2}; do
-            PORT=$((BASE_PORT + i))
-
+        for ((i = 1; i <= SEQ_EFFECTIVE_COUNT; i++)); do
             # Skip stopped sequencer
-            if [ $((i+1)) = "$OLD_LEADER" ]; then
+            if [ "$i" = "$OLD_LEADER" ]; then
                 continue
             fi
 
+            PORT_VAR="CONDUCTOR_RPC_PORT_$i"
+            PORT="${!PORT_VAR}"
             IS_LEADER=$(curl -s -X POST -H "Content-Type: application/json" \
                 --data '{"jsonrpc":"2.0","method":"conductor_leader","params":[],"id":1}' \
                 http://localhost:$PORT 2>/dev/null | jq -r .result)
 
             if [ "$IS_LEADER" = "true" ]; then
-                NEW_LEADER=$((i+1))
+                NEW_LEADER=$i
                 echo "  ✓ Failover completed: conductor-$OLD_LEADER → conductor-$NEW_LEADER (${s}s)"
                 break 2
             fi

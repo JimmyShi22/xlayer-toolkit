@@ -9,6 +9,9 @@ ENV_FILES=(
     "kailua/.env.deploy:kailua/example.env.deploy"
     "kailua/.env.proposer:kailua/example.env.proposer"
     "kailua/.env.validator:kailua/example.env.validator"
+    "op-succinct/.env.deploy:op-succinct/example.env.deploy"
+    "op-succinct/.env.proposer:op-succinct/example.env.proposer"
+    "op-succinct/.env.challenger:op-succinct/example.env.challenger"
 )
 
 for env_pair in "${ENV_FILES[@]}"; do
@@ -21,6 +24,14 @@ for env_pair in "${ENV_FILES[@]}"; do
 done
 
 echo " 📦 Stopping Docker containers..."
+# .env's COMPOSE_FILE references docker-compose.cluster.yml, and other
+# static services (e.g. op-challenger) depend_on services the generator
+# defines (op-seq). On a fresh checkout docker-compose.cluster.yml won't
+# exist yet, so regenerate it before `docker compose down` so the merged
+# compose project is always valid.
+if [ -f .env ] && [ ! -f docker-compose.cluster.yml ]; then
+    ( set -a; source .env; set +a; ./scripts/generate-cluster.sh )
+fi
 [ -f .env ] && docker compose down
 
 # Some dirs below are created by containers running as root, so the host user
@@ -38,6 +49,9 @@ docker run --rm -v "$(pwd):/w" --entrypoint sh "$CLEAN_IMAGE" -c '
 
 echo " 🗑️  Removing generated files..."
 rm -rf data
+rm -rf config-op/cluster
+rm -rf docker-compose.cluster.yml
+rm -rf monitoring/prometheus.yml
 rm -rf config-op/genesis.json
 rm -rf config-op/genesis-reth.json
 rm -rf config-op/gen.test.reth.rpc.config.toml
