@@ -11,23 +11,21 @@ IDENTITY_FILE="${IDENTITY_FILE:-/identity.env}"
 # shellcheck disable=SC1090
 . "$IDENTITY_FILE"
 
-[ -n "${RPC_DISCOVERY_SECRET:-}" ] || { echo "Generated RPC_DISCOVERY_SECRET is empty" >&2; exit 1; }
+[ -n "${DISCOVERY_SECRET:-}" ] || { echo "Generated sequencer DISCOVERY_SECRET is empty" >&2; exit 1; }
 
 GETH_HELP=$(geth --help 2>/dev/null || true)
 set -- \
+    "--networkid=${CHAIN_ID}" \
     --verbosity=3 \
     --datadir=/datadir \
     "--db.engine=${DB_ENGINE:-pebble}" \
     --config=/config.toml \
     --gcmode=archive \
-    "--nodekeyhex=${RPC_DISCOVERY_SECRET}"
+    --rollup.disabletxpoolgossip=false \
+    "--nodekeyhex=${DISCOVERY_SECRET}"
 
-if printf '%s' "$GETH_HELP" | grep -q -- '--rollup.enabletxpooladmission'; then
-    set -- "$@" --rollup.enabletxpooladmission
-fi
-if [ "${TRUSTED_NODES_ONLY:-false}" = "true" ] && \
-    printf '%s' "$GETH_HELP" | grep -q -- '--rollup.txpool.trusted-peers-only'; then
-    set -- "$@" --rollup.txpool.trusted-peers-only
+if [ "${INDEX:-1}" = "1" ]; then
+    set -- "$@" --pprof=true --pprof.addr=0.0.0.0 --pprof.port=9092
 fi
 if printf '%s' "$GETH_HELP" | grep -q -- '--rollup.allow-gasless'; then
     set -- "$@" "--rollup.allow-gasless=${ENABLE_GASLESS:-false}"

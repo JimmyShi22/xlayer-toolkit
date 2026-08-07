@@ -2,15 +2,22 @@
 
 set -e
 
-BASE_CONDUCTOR_PORT=8547
-BASE_SEQUENCER_PORT=9545
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CLUSTER_ENV_PATH="${CLUSTER_ENV_PATH:-$(dirname "$SCRIPT_DIR")/config-op/cluster/cluster.env}"
+[ -f "$CLUSTER_ENV_PATH" ] || { echo "❌ Missing generated cluster environment: $CLUSTER_ENV_PATH" >&2; exit 1; }
+# shellcheck disable=SC1090
+source "$CLUSTER_ENV_PATH"
+# shellcheck source=scripts/lib/cluster-services.sh
+source "$SCRIPT_DIR/lib/cluster-services.sh"
+require_conductor_utility_topology gray-upgrade-simulation
 CURRENT_LEADER=0
 UPGRADED_SEQUENCER=0
 
 # Function to check if a conductor is leader
 check_leader() {
     local conductor_id=$1
-    local port=$((BASE_CONDUCTOR_PORT + conductor_id - 1))
+    local port_var="CONDUCTOR_RPC_PORT_$conductor_id"
+    local port="${!port_var}"
     curl -s -X POST -H "Content-Type: application/json" \
         --data '{"jsonrpc":"2.0","method":"conductor_leader","params":[],"id":1}' \
         http://localhost:$port | jq -r .result
@@ -19,62 +26,60 @@ check_leader() {
 # Function to stop containers
 stop_containers() {
     local sequencer_id=$1
+    local cl_service el_service
+    cl_service=$(selected_seq_cl_service "$sequencer_id")
+    el_service=$(selected_seq_el_service "$sequencer_id")
     echo "Stopping containers for sequencer-$sequencer_id..."
-
-    # Handle sequencer 1 (no suffix) vs others (with suffix)
-    if [ "$sequencer_id" = "1" ]; then
-        docker stop op-seq op-geth-seq 2>/dev/null || true
-        echo "Containers stopped: op-seq, op-geth-seq"
-    else
-        docker stop op-seq$sequencer_id op-geth-seq$sequencer_id 2>/dev/null || true
-        echo "Containers stopped: op-seq$sequencer_id, op-geth-seq$sequencer_id"
+    if ! docker stop "$cl_service" "$el_service"; then
+        echo "❌ Failed to stop containers for sequencer-$sequencer_id: $cl_service, $el_service" >&2
+        return 1
     fi
+    echo "Containers stopped: $cl_service, $el_service"
 }
 
 # Function to start containers
 start_containers() {
     local sequencer_id=$1
+    local cl_service el_service
+    cl_service=$(selected_seq_cl_service "$sequencer_id")
+    el_service=$(selected_seq_el_service "$sequencer_id")
     echo "Starting containers for sequencer-$sequencer_id..."
-
-    # Handle sequencer 1 (no suffix) vs others (with suffix)
-    if [ "$sequencer_id" = "1" ]; then
-        docker start op-seq op-geth-seq 2>/dev/null || true
-        echo "Containers started: op-seq, op-geth-seq"
-    else
-        docker start op-seq$sequencer_id op-geth-seq$sequencer_id 2>/dev/null || true
-        echo "Containers started: op-seq$sequencer_id, op-geth-seq$sequencer_id"
+    if ! docker start "$cl_service" "$el_service"; then
+        echo "❌ Failed to start containers for sequencer-$sequencer_id: $cl_service, $el_service" >&2
+        return 1
     fi
+    echo "Containers started: $cl_service, $el_service"
 }
 
 # Function to wait for service to be ready
 wait_for_service() {
     local port=$1
     local service_name=$2
-    local max_attempts=30
+    local max_attempts="${GRAY_READINESS_MAX_ATTEMPTS:-30}"
     local attempt=0
 
     echo "Waiting for $service_name to be ready on port $port..."
-    while [ $attempt -lt $max_attempts ]; do
-        if curl -s http://localhost:$port > /dev/null 2>&1; then
+    while [ "$attempt" -lt "$max_attempts" ]; do
+        if curl --fail --silent "http://localhost:$port" > /dev/null 2>&1; then
             echo "$service_name is ready"
             return 0
         fi
         sleep 1
-        ((attempt++))
+        attempt=$((attempt + 1))
     done
-    echo "Warning: $service_name not ready after $max_attempts seconds"
+    echo "❌ $service_name not ready after $max_attempts attempts" >&2
     return 1
 }
 
 # Function to find current leader
 find_current_leader() {
-    for i in {0..2}; do
-        local port=$((BASE_CONDUCTOR_PORT + i))
-        local is_leader=$(check_leader $((i+1)))
+    local i
+    for ((i = 1; i <= SEQ_EFFECTIVE_COUNT; i++)); do
+        local is_leader=$(check_leader "$i")
 
         if [ "$is_leader" = "true" ]; then
-            CURRENT_LEADER=$((i+1))
-            echo "conductor-$CURRENT_LEADER is current leader (port $port)"
+            CURRENT_LEADER=$i
+            echo "conductor-$CURRENT_LEADER is current leader"
             return 0
         fi
     done
@@ -172,7 +177,8 @@ check_block_continuity() {
 transfer_leadership() {
     local from_conductor=$1
     local to_conductor=$2
-    local from_port=$((BASE_CONDUCTOR_PORT + from_conductor - 1))
+    local from_port_var="CONDUCTOR_RPC_PORT_$from_conductor"
+    local from_port="${!from_port_var}"
 
     # Build target conductor address
     local target_addr="op-conductor"
@@ -199,7 +205,7 @@ fi
 echo "Step 2: Selecting a follower sequencer for upgrade..."
 # Find a follower (non-leader) sequencer to upgrade
 UPGRADED_SEQUENCER=0
-for i in {1..3}; do
+for ((i = 1; i <= SEQ_EFFECTIVE_COUNT; i++)); do
     if [ "$i" != "$CURRENT_LEADER" ]; then
         UPGRADED_SEQUENCER=$i
         echo "Selected sequencer-$UPGRADED_SEQUENCER for upgrade (current leader is sequencer-$CURRENT_LEADER)"
@@ -226,8 +232,10 @@ start_containers $UPGRADED_SEQUENCER
 
 # Step 6: Wait for services to be ready
 echo "Step 6: Waiting for services to be ready..."
-wait_for_service $((BASE_SEQUENCER_PORT + UPGRADED_SEQUENCER - 1)) "op-seq$UPGRADED_SEQUENCER"
-wait_for_service $((BASE_CONDUCTOR_PORT + UPGRADED_SEQUENCER - 1)) "op-conductor$UPGRADED_SEQUENCER"
+UPGRADED_OPNODE_PORT_VAR="OPNODE_RPC_PORT_$UPGRADED_SEQUENCER"
+UPGRADED_CONDUCTOR_PORT_VAR="CONDUCTOR_RPC_PORT_$UPGRADED_SEQUENCER"
+wait_for_service "${!UPGRADED_OPNODE_PORT_VAR}" "op-seq$UPGRADED_SEQUENCER"
+wait_for_service "${!UPGRADED_CONDUCTOR_PORT_VAR}" "op-conductor$UPGRADED_SEQUENCER"
 
 # Step 7: Verify the upgraded sequencer is inactive
 echo "Step 7: Verifying upgraded sequencer is inactive..."

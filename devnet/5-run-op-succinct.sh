@@ -8,6 +8,10 @@ set -e
 # Load environment variables
 source .env
 
+SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/scripts" && pwd)"
+# shellcheck source=scripts/lib/op-succinct.sh
+source "$SCRIPTS_DIR/lib/op-succinct.sh"
+
 sed_inplace() {
   if [[ "$OSTYPE" == "darwin"* ]]; then
     sed -i '' "$@"
@@ -22,7 +26,6 @@ if [ "$PROOF_ENGINE" != "op-succinct" ]; then
 fi
 
 PWD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPTS_DIR=$PWD_DIR/scripts
 OP_SUCCINCT_DIR=$PWD_DIR/op-succinct
 
 if [ ! -f "$OP_SUCCINCT_DIR"/.env.deploy ]; then
@@ -66,6 +69,7 @@ sed_inplace "s|^L1_RPC=.*|L1_RPC=$L1_RPC_URL_IN_DOCKER|" "$OP_SUCCINCT_DIR"/.env
 sed_inplace "s|^L1_BEACON_RPC=.*|L1_BEACON_RPC=$L1_BEACON_URL_IN_DOCKER|" "$OP_SUCCINCT_DIR"/.env.proposer
 sed_inplace "s|^L2_RPC=.*|L2_RPC=$L2_RPC_URL_IN_DOCKER|" "$OP_SUCCINCT_DIR"/.env.proposer
 sed_inplace "s|^FACTORY_ADDRESS=.*|FACTORY_ADDRESS=$DISPUTE_GAME_FACTORY_ADDRESS|" "$OP_SUCCINCT_DIR"/.env.proposer
+upsert_env_value "$OP_SUCCINCT_DIR/.env.proposer" ANCHOR_STATE_REGISTRY_ADDRESS "$ANCHOR_STATE_REGISTRY"
 sed_inplace "s|^L2_NODE_RPC=.*|L2_NODE_RPC=$L2_NODE_RPC_URL_IN_DOCKER|" "$OP_SUCCINCT_DIR"/.env.proposer
 
 sed_inplace "s|^MOCK_MODE=.*|MOCK_MODE=$PROOF_MOCK_MODE|" "$OP_SUCCINCT_DIR"/.env.proposer
@@ -74,6 +78,7 @@ sed_inplace "s|^MOCK_MODE=.*|MOCK_MODE=$PROOF_MOCK_MODE|" "$OP_SUCCINCT_DIR"/.en
 sed_inplace "s|^L1_RPC=.*|L1_RPC=$L1_RPC_URL_IN_DOCKER|" "$OP_SUCCINCT_DIR"/.env.challenger
 sed_inplace "s|^L2_RPC=.*|L2_RPC=$L2_RPC_URL_IN_DOCKER|" "$OP_SUCCINCT_DIR"/.env.challenger
 sed_inplace "s|^FACTORY_ADDRESS=.*|FACTORY_ADDRESS=$DISPUTE_GAME_FACTORY_ADDRESS|" "$OP_SUCCINCT_DIR"/.env.challenger
+upsert_env_value "$OP_SUCCINCT_DIR/.env.challenger" ANCHOR_STATE_REGISTRY_ADDRESS "$ANCHOR_STATE_REGISTRY"
 
 docker compose up op-succinct-fetch-config
 OP_DEPLOYER_ADDR=$(cast wallet a "$DEPLOYER_PRIVATE_KEY")
@@ -97,8 +102,7 @@ while true; do
 done
 
 
-docker compose up -d op-succinct-proposer
-echo "   ✓ Proposer started"
+recreate_and_verify_service op-succinct-proposer
 
 if [ "$MIN_RUN" = "false" ]; then
     docker-compose down op-proposer
@@ -108,8 +112,7 @@ fi
 
 # Start challenger if fast finality mode is disabled
 if [ "${PROOF_FAST_FINALITY_MODE}" != "true" ]; then
-    docker compose up -d op-succinct-challenger
-    echo "   ✓ Challenger started"
+    recreate_and_verify_service op-succinct-challenger
 else
     echo "   ⏭  Challenger skipped (fast finality mode)"
 fi

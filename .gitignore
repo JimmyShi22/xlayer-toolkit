@@ -23,6 +23,9 @@ devnet/l1-geth/consensus/validatordata
 devnet/config-op/genesis.json
 devnet/config-op/genesis-reth.json
 devnet/config-op/genesis.json.gz
+devnet/config-op/cluster/
+devnet/docker-compose.cluster.yml
+devnet/monitoring/prometheus.yml
 devnet/config-op/gen.test.geth.rpc.config.toml
 devnet/config-op/gen.test.reth.rpc.config.toml
 devnet/config-op/implementations.json
@@ -38,6 +41,7 @@ devnet/data
 devnet/logs
 devnet/saved-cannon-data
 devnet/init.log
+devnet/.cache/
 devnet/l1-geth/
 profiling/
 tools/adventure/txhashes.log

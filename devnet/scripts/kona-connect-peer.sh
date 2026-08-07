@@ -15,7 +15,8 @@
 #   --peer MULTIADDR       Override entirely; skip auto-discovery
 #   --health-timeout N     Wait up to N seconds for /healthz (default: 60)
 #   --no-wait              Don't wait for /healthz
-# Env:    KONA_SEQ_RPC, KONA_PEER_{HOST,PORT,MULTIADDR}, KONA_HEALTH_TIMEOUT
+# Env:    KONA_SEQ_RPC, KONA_PEER_{HOST,PORT,MULTIADDR}, KONA_HEALTH_TIMEOUT,
+#         KONA_CONNECT_ATTEMPTS, KONA_CONNECT_RETRY_SECONDS
 
 set -euo pipefail
 
@@ -24,6 +25,8 @@ PEER_HOST="${KONA_PEER_HOST:-op-seq}"
 PEER_PORT="${KONA_PEER_PORT:-9223}"
 PEER_MULTIADDR="${KONA_PEER_MULTIADDR:-}"
 HEALTH_TIMEOUT="${KONA_HEALTH_TIMEOUT:-60}"
+CONNECT_ATTEMPTS="${KONA_CONNECT_ATTEMPTS:-3}"
+CONNECT_RETRY_SECONDS="${KONA_CONNECT_RETRY_SECONDS:-2}"
 WAIT_HEALTHZ=true
 RPC_URLS=()
 
@@ -98,9 +101,22 @@ for rpc_url in "${RPC_URLS[@]}"; do
         wait_healthz "$rpc_url" || exit 1
     fi
 
-    echo "Connecting ${rpc_url} → ${PEER_MULTIADDR}"
-    response=$(curl -s -X POST -H 'Content-Type: application/json' \
-        --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"opp2p_connectPeer\",\"params\":[\"${PEER_MULTIADDR}\"]}" \
-        "$rpc_url")
+    connected=false
+    response=""
+    for ((attempt = 1; attempt <= CONNECT_ATTEMPTS; attempt++)); do
+        echo "Connecting ${rpc_url} → ${PEER_MULTIADDR} (attempt ${attempt}/${CONNECT_ATTEMPTS})"
+        if response=$(curl --fail --silent --show-error -X POST -H 'Content-Type: application/json' \
+            --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"opp2p_connectPeer\",\"params\":[\"${PEER_MULTIADDR}\"]}" \
+            "$rpc_url") && \
+            jq -e 'has("result") and (.error == null)' > /dev/null 2>&1 <<< "$response"; then
+            connected=true
+            break
+        fi
+        [ "$attempt" -eq "$CONNECT_ATTEMPTS" ] || sleep "$CONNECT_RETRY_SECONDS"
+    done
+    if [ "$connected" != "true" ]; then
+        echo "❌ failed to connect ${rpc_url} to ${PEER_MULTIADDR}: ${response:-no response}" >&2
+        exit 1
+    fi
     echo "  response: $response"
 done

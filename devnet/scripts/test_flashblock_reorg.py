@@ -6,23 +6,27 @@ This script monitors flashblocks via WebSocket and verifies that all flashblock 
 (index > 0) eventually appear in canonical blocks, even after a sequencer/builder switch.
 
 Usage:
-    python test_flashblock_reorg_mitigation.py [--ws-url URL] [--rpc-url URL] [--duration SECONDS] [--verbose]
+    python test_flashblock_reorg.py [--ws-url URL] [--rpc-url URL] [--duration SECONDS] [--verbose]
 
 Example:
-    python test_flashblock_reorg_mitigation.py --ws-url ws://localhost:11111 --rpc-url http://localhost:8124
+    python test_flashblock_reorg.py --duration 60
 """
 
 import argparse
 import asyncio
 import json
+import os
 import signal
 import sys
 import time
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Dict, List, Optional, Set
 from urllib.error import URLError
 from urllib.request import Request, urlopen
+
+from lib.cluster_endpoints import resolve_flashblock_endpoints
 
 try:
     from websockets import connect
@@ -651,19 +655,27 @@ class FlashblockReorgTester:
 
 
 def main():
+    cluster_env_path = Path(
+        os.environ.get(
+            "CLUSTER_ENV_PATH",
+            Path(__file__).resolve().parent.parent / "config-op/cluster/cluster.env",
+        )
+    )
+    default_ws_urls, default_rpc_url = resolve_flashblock_endpoints(cluster_env_path)
+
     parser = argparse.ArgumentParser(
         description="Test flashblock reorg mitigation across sequencer/builder changes"
     )
     parser.add_argument(
         "--ws-url",
         nargs="+",
-        default=["ws://localhost:11111", "ws://localhost:11112"],
-        help="Flashblocks WebSocket URLs (default: ws://localhost:11111 ws://localhost:11112)",
+        default=default_ws_urls,
+        help="Flashblocks WebSocket URLs (default: generated cluster inventory)",
     )
     parser.add_argument(
         "--rpc-url",
-        default="http://localhost:8124",
-        help="Ethereum RPC URL (default: http://localhost:8124)",
+        default=default_rpc_url,
+        help="Ethereum RPC URL (default: generated RPC node, then sequencer)",
     )
     parser.add_argument(
         "--duration",

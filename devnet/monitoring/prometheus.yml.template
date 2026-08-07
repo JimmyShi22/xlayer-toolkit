@@ -6,8 +6,3 @@ scrape_configs:
   - job_name: 'prometheus'
     static_configs:
       - targets: ['localhost:9090']
-
-  - job_name: 'op-reth-seq'
-    static_configs:
-      - targets: ['op-reth-seq:9001']
-    metrics_path: /metrics

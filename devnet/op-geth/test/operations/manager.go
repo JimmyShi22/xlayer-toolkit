@@ -1,8 +1,12 @@
 package operations
 
 import (
+	"bufio"
 	"context"
 	"math/big"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -21,9 +25,7 @@ const (
 	DefaultL1AdminAddress           = "0x8f8E2d6cF621f30e9a11309D6A56A876281Fd534"
 	DefaultL1AdminPrivateKey        = "0x815405dddb0e2a99b12af775fd2929e526704e1d1aea6a0b4e74dc33e2f7fcd2"
 
-	DefaultL2NetworkURL        = "http://localhost:8124"
-	DefaultL2SeqURL            = "http://localhost:8123"
-	DefaultL2ChainID    uint64 = 195
+	DefaultL2ChainID uint64 = 195
 
 	DefaultL2MetricsPrometheusURL = "http://127.0.0.1:9092/debug/metrics/prometheus"
 	DefaultL2MetricsURL           = "http://127.0.0.1:9092/debug/metrics"
@@ -44,7 +46,99 @@ const (
 	DefaultL2NewAcc2PrivateKey = "bc362a16d3dedd6cdba639eb8fa91b2f6d9f929eb490ca2e5a748ba041c6a131"
 )
 
-var clientRPC *ethclient.Client
+var (
+	DefaultL2NetworkURL, DefaultL2SeqURL = resolveL2URLs()
+	clientRPC                            *ethclient.Client
+)
+
+func resolveL2URLs() (string, string) {
+	cluster := loadClusterInventory()
+
+	seqURL := os.Getenv("XLAYER_L2_SEQ_URL")
+	if seqURL == "" {
+		seqURL = localEndpoint(cluster["EL_HTTP_PORT_1"], "8123")
+	}
+
+	rpcURL := os.Getenv("XLAYER_L2_RPC_URL")
+	if rpcURL == "" {
+		if cluster["RPC_EFFECTIVE_COUNT"] != "0" && cluster["RPC_EL_HTTP_PORT_1"] != "" {
+			rpcURL = localEndpoint(cluster["RPC_EL_HTTP_PORT_1"], "8223")
+		} else if cluster["EL_HTTP_PORT_1"] != "" {
+			rpcURL = seqURL
+		} else {
+			rpcURL = localEndpoint("", "8223")
+		}
+	}
+
+	return rpcURL, seqURL
+}
+
+func localEndpoint(port, fallback string) string {
+	if port == "" {
+		port = fallback
+	}
+	return "http://localhost:" + port
+}
+
+func loadClusterInventory() map[string]string {
+	path := os.Getenv("XLAYER_CLUSTER_ENV")
+	if path == "" {
+		path = findClusterInventory()
+	}
+	values := make(map[string]string)
+	if path == "" {
+		return values
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		return values
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		values[strings.TrimSpace(key)] = strings.Trim(strings.TrimSpace(value), "'\"")
+	}
+	return values
+}
+
+func findClusterInventory() string {
+	searchRoots := make([]string, 0, 2)
+	if cwd, err := os.Getwd(); err == nil {
+		searchRoots = append(searchRoots, cwd)
+	}
+	if _, file, _, ok := runtime.Caller(0); ok {
+		searchRoots = append(searchRoots, filepath.Dir(file))
+	}
+
+	for _, root := range searchRoots {
+		for dir := root; ; dir = filepath.Dir(dir) {
+			for _, relative := range []string{
+				filepath.Join("config-op", "cluster", "cluster.env"),
+				filepath.Join("devnet", "config-op", "cluster", "cluster.env"),
+			} {
+				candidate := filepath.Join(dir, relative)
+				if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+					return candidate
+				}
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+		}
+	}
+	return ""
+}
 
 func init() {
 	var err error

@@ -2,18 +2,26 @@
 
 set -e
 
-source /.env
+ENV_FILE="${ENV_FILE:-/.env}"
+[ -f "$ENV_FILE" ] || { echo "Missing Reth environment file: $ENV_FILE" >&2; exit 1; }
+# shellcheck disable=SC1090
+source "$ENV_FILE"
 
-# Drop our own enode from the (shared) trusted-peers list so this node does not
-# dial itself. trusted-peers.sh emits one list containing every reth node's
-# enode and both the seq and rpc entrypoints consume it; combined with
-# --disable-discovery each node dials exactly that list, so without this filter
-# the node connects to itself (noisy "already connected" churn in the logs).
-# $1 is the seq index (empty for op-reth-seq, set for op-reth-seq2).
-OWN_P2P_HOST="op-${SEQ_TYPE}-seq${1:-}"
+# Each generated node has its own suffix and enode. Load it when the
+# entrypoint runs in a cluster, while keeping the single-node invocation
+# compatible with the entrypoint argument.
+ENTRYPOINT_SUFFIX="${1:-}"
+if [ -f /identity.env ]; then
+    source /identity.env
+    ENTRYPOINT_SUFFIX="${SUFFIX:-$ENTRYPOINT_SUFFIX}"
+fi
+
+# All generated Reth enodes are supplied through the shared trusted-peer list.
+# Do not ask a node to dial its own entry from that list.
+OWN_P2P_HOST="op-${SEQ_TYPE}-seq${ENTRYPOINT_SUFFIX}"
 _filtered=""
 _OLDIFS="$IFS"; IFS=','
-for _peer in $TRUSTED_PEERS; do
+for _peer in ${TRUSTED_PEERS:-}; do
     [ -z "$_peer" ] && continue
     case "$_peer" in *"@${OWN_P2P_HOST}:"*) continue ;; esac
     _filtered="${_filtered:+$_filtered,}$_peer"
@@ -34,18 +42,17 @@ else
     CHAIN="/genesis.json"
 fi
 
-# Build storage flags
-RETH_INIT_STORAGE_FLAGS=""
+# Probe once and reuse the same capability inventory for storage and optional
+# XLayer/gasless flags.
+RETH_NODE_HELP="$(op-reth node --help 2>/dev/null || true)"
+
+# Build storage flags compatible with both storage-v1 and storage-v2 Reth.
+RETH_STORAGE_FLAGS=""
 if [ "${RETH_STORAGE_V2:-false}" = "true" ]; then
-    if [ -n "${RETH_ROCKSDB_PATH:-}" ]; then
-        RETH_INIT_STORAGE_FLAGS="$RETH_INIT_STORAGE_FLAGS --datadir.rocksdb=$RETH_ROCKSDB_PATH"
-    fi
+    [ -n "${RETH_ROCKSDB_PATH:-}" ] && RETH_STORAGE_FLAGS="--datadir.rocksdb=$RETH_ROCKSDB_PATH"
 else
-    # Opt out of storage v2 only if this op-reth build exposes the flag. The
-    # xlayer gasless reth build has no --storage.v2 and would abort with
-    # "unexpected argument '--storage.v2'".
-    if op-reth node --help 2>/dev/null | grep -q -- '--storage.v2'; then
-        RETH_INIT_STORAGE_FLAGS="--storage.v2=false"
+    if grep -q -- '--storage.v2' <<<"$RETH_NODE_HELP"; then
+        RETH_STORAGE_FLAGS="--storage.v2=false"
     fi
 fi
 
@@ -53,7 +60,7 @@ CMD="op-reth node \
       --datadir=/datadir \
       --chain=$CHAIN \
       --config=/config.toml \
-      $RETH_INIT_STORAGE_FLAGS \
+      $RETH_STORAGE_FLAGS \
       --http \
       --http.corsdomain=* \
       --http.port=8545 \
@@ -86,28 +93,21 @@ CMD="op-reth node \
       --metrics=0.0.0.0:9001 \
       --xlayer.sequencer-mode"
 
-# Only pass --trusted-peers if any remain after removing our own enode (an empty
-# --trusted-peers= would be rejected).
 if [ -n "$TRUSTED_PEERS" ]; then
     CMD="$CMD --trusted-peers=$TRUSTED_PEERS"
 fi
 
-# Enable XLayer gasless (zero gas price) transactions in the mempool
 if [ "${ENABLE_GASLESS:-false}" = "true" ]; then
     CMD="$CMD --rollup.allow-gasless"
 fi
 
-# Gasless tuning flags only exist on newer op-reth builds; apply each only if the
-# binary advertises it (older builds abort on an unknown argument). --help is
-# evaluated once and reused.
-RETH_NODE_HELP="$(op-reth node --help 2>/dev/null || true)"
-if echo "$RETH_NODE_HELP" | grep -q -- '--rollup.gasless-mock-gas-price-percentile'; then
+if grep -q -- '--rollup.gasless-mock-gas-price-percentile' <<<"$RETH_NODE_HELP"; then
     CMD="$CMD --rollup.gasless-mock-gas-price-percentile=${GASLESS_MOCK_GAS_PRICE_PERCENTILE:-0.1}"
 fi
-if echo "$RETH_NODE_HELP" | grep -q -- '--rollup.gasless-pending-lifetime'; then
+if grep -q -- '--rollup.gasless-pending-lifetime' <<<"$RETH_NODE_HELP"; then
     CMD="$CMD --rollup.gasless-pending-lifetime=${GASLESS_PENDING_LIFETIME_SECS:-600}"
 fi
-if echo "$RETH_NODE_HELP" | grep -q -- '--builder.gasless-block-gas-limit'; then
+if grep -q -- '--builder.gasless-block-gas-limit' <<<"$RETH_NODE_HELP"; then
     CMD="$CMD --builder.gasless-block-gas-limit=${BUILDER_GASLESS_BLOCK_GAS_LIMIT:-60000000}"
 fi
 
@@ -127,13 +127,11 @@ if [ "$FLASHBLOCK_ENABLED" = "true" ]; then
             --flashblocks.p2p_port=9009 \
             --flashblocks.p2p_private_key_file=/datadir/fb-p2p-key"
 
-        INDEX="${1:-}"
-        if [ -z "$INDEX" ]; then
-            # op-reth-seq connects to op-reth-seq2
-            CMD="$CMD --flashblocks.p2p_known_peers=/dns4/op-reth-seq2/tcp/9009/p2p/12D3KooWGnxtRXJWhNtwKmRjpqj5QFQPskjWJkC7AkGWhCXBM6ed"
-        else
-            # op-reth-seq2 connects to op-reth-seq
-            CMD="$CMD --flashblocks.p2p_known_peers=/dns4/op-reth-seq/tcp/9009/p2p/12D3KooWC6qFQzcS6V6Tp53nRqw2pmU1snjSYq7H4Q6ckTWAskTt"
+        # FB_KNOWN_PEERS is the full-mesh peer list (all other cluster nodes)
+        # computed by scripts/generate-cluster-compose.sh and injected as an
+        # environment variable on this container.
+        if [ -n "${FB_KNOWN_PEERS:-}" ]; then
+            CMD="$CMD --flashblocks.p2p_known_peers=$FB_KNOWN_PEERS"
         fi
     fi
 fi
