@@ -1,8 +1,10 @@
-.PHONY: build lint erc20 gasless hybrid native io fib create
+.PHONY: build lint erc20 uni gasless hybrid native io fib create
 
 # Configuration variables
 CONFIG_FILE := ./testdata/config.json
 INIT_AMOUNT := 10000ETH
+# Native gas per account for the Uniswap benchmark. Token balances are provisioned separately.
+UNI_INIT_AMOUNT ?= 1ETH
 # Gasless bench scenario: approve | transfer (override: make gasless GASLESS_SCENARIO=approve)
 GASLESS_SCENARIO := transfer
 
@@ -36,6 +38,16 @@ erc20: build
 	@sleep 10
 	@adventure erc20-bench -f $(CONFIG_FILE) --contract $$(grep "ERC20 Address:" /tmp/erc20-init.log | awk '{print $$NF}')
 	@echo "✅ ERC20 test completed!"
+
+# Uniswap v4 swap stress test (deploy + provision accounts + bench)
+uni: build
+	@echo "🚀 Starting Uniswap v4 swap test..."
+	@adventure uni-init $(UNI_INIT_AMOUNT) -f $(CONFIG_FILE) 2>&1 | tee /tmp/uni-init.log
+	@sleep 10
+	@adventure uni-bench -f $(CONFIG_FILE) \
+		--router $$(grep -oE "SwapRouter=0x[0-9a-fA-F]{40}" /tmp/uni-init.log | tail -1 | cut -d= -f2) \
+		--token $$(grep -oE "ERC20=0x[0-9a-fA-F]{40}" /tmp/uni-init.log | tail -1 | cut -d= -f2)
+	@echo "✅ Uniswap v4 swap test completed!"
 
 # Gasless ERC20 stress test (devnet, chain id 195): gasless-init deploys + whitelists an ERC20, then
 # gasless-bench uses that ERC20 as both the approve and transfer token via --contract.

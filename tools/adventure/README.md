@@ -14,6 +14,13 @@ make erc20
 adventure erc20-init 10ETH -f ./testdata/config.json 
 adventure erc20-bench -f ./testdata/config.json --contract 0xContractAddress
 
+# Uniswap v4 swap stress test (deploy v4 + ERC20 + pool, provision accounts, benchmark swaps)
+make uni
+
+# Or run manually. uni-init prints SwapRouter and ERC20 in its UNI_DEPLOYMENT line:
+adventure uni-init 10ETH -f ./testdata/config.json
+adventure uni-bench -f ./testdata/config.json --router 0xSwapRouter --token 0xERC20
+
 # Gasless ERC20 stress test (deploy + register as gasless token + zero-gas-price benchmark)
 make gasless
 make gasless GASLESS_SCENARIO=approve   # run the approve scenario instead of transfer
@@ -138,6 +145,21 @@ Note: on chain id 195 only, `gasless-init` enables gasless and registers the dep
 - **maxBatchSize**: Maximum transactions per batch (default `100`)
 - **gasPriceGwei**: Gas price in Gwei
 - **saveTxHashes**: Enable saving transaction hashes to `./txhashes.log` (default: `false`)
+
+### Uniswap v4 benchmark
+
+`uni-init` deploys an embedded build of v4-core's `PoolManager`, `PoolModifyLiquidityTest`, and
+`PoolSwapTest`, plus an `Adventure Token (ADV)`. It creates a 0.3% ETH/ADV pool, adds liquidity,
+funds the selected accounts with the native amount passed on the command line, and provisions each
+account with `1,000,000 ADV` and an unlimited allowance to the swap router. The benchmark-only token
+uses an owner batch initializer so setup does not require one approve transaction per account.
+
+`uni-bench` repeatedly sends exact-input `ADV -> ETH` swaps (1 gwei of ADV per transaction). The
+small input keeps the initialized pool usable for a long TPS run while exercising v4's complete
+unlock, swap, ERC20 settlement, and native take path. Concurrency, RPC distribution, batching,
+mempool backpressure, target TPS, account offsets, and transaction-hash output use the same top-level
+configuration fields as `erc20-bench`. The target chain must support Cancun transient storage
+(EIP-1153), which Uniswap v4's PoolManager uses.
 
 ### `simulatorParams.simulatorConfig` (used by `io-bench` / `fib-bench`)
 

@@ -19,12 +19,16 @@ const (
 	FlagConfigFile = "config-file"
 	FlagContract   = "contract"
 	FlagScenario   = "scenario"
+	FlagRouter     = "router"
+	FlagToken      = "token"
 )
 
 var (
 	configPath      string
 	contractAddr    string
 	gaslessScenario string
+	routerAddr      string
+	tokenAddr       string
 )
 
 func main() {
@@ -37,6 +41,8 @@ func main() {
 	rootCmd.AddCommand(
 		erc20InitCmd(),
 		erc20BenchCmd(),
+		uniInitCmd(),
+		uniBenchCmd(),
 		gaslessInitCmd(),
 		gaslessBenchCmd(),
 		hybridInitCmd(),
@@ -53,6 +59,70 @@ func main() {
 		fmt.Println(err)
 		os.Exit(1)
 	}
+}
+
+func uniInitCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "uni-init <amount>",
+		Short: "Deploy Uniswap v4, create an ETH/ERC20 pool, and provision benchmark accounts",
+		Long: `Deploy a Uniswap v4 PoolManager, settlement routers, and an ERC20; initialize an
+ETH/ERC20 pool with liquidity; then fund every benchmark account with native gas and a large token
+balance plus swap-router allowance.
+
+Amount is the native-token funding per benchmark account and must end with ETH.
+
+Example:
+  adventure uni-init 10ETH -f ./testdata/config.json`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			if configPath == "" {
+				fmt.Println("Error: Config file (-f) is required")
+				os.Exit(1)
+			}
+			if err := bench.UniInit(args[0], configPath); err != nil {
+				fmt.Printf("Uniswap v4 initialization failed: %v\n", err)
+				os.Exit(1)
+			}
+		},
+	}
+
+	cmd.Flags().StringVarP(&configPath, FlagConfigFile, "f", "", "Path to the benchmark configuration file")
+	return cmd
+}
+
+func uniBenchCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "uni-bench",
+		Short: "Run a Uniswap v4 swap TPS benchmark",
+		Long: `Continuously submit exact-input ERC20-to-ETH swaps through the v4 swap router using
+the configured benchmark accounts. Run uni-init first and pass its SwapRouter and ERC20 addresses.
+
+Example:
+  adventure uni-bench -f ./testdata/config.json --router 0xRouter --token 0xToken`,
+		Run: func(cmd *cobra.Command, args []string) {
+			if configPath == "" {
+				fmt.Println("Error: Config file (-f) is required")
+				os.Exit(1)
+			}
+			if routerAddr == "" {
+				fmt.Println("Error: Swap router address (--router) is required")
+				os.Exit(1)
+			}
+			if tokenAddr == "" {
+				fmt.Println("Error: ERC20 address (--token) is required")
+				os.Exit(1)
+			}
+			if err := bench.UniBench(configPath, routerAddr, tokenAddr); err != nil {
+				fmt.Printf("Uniswap v4 benchmark failed: %v\n", err)
+				os.Exit(1)
+			}
+		},
+	}
+
+	cmd.Flags().StringVarP(&configPath, FlagConfigFile, "f", "", "Path to the benchmark configuration file")
+	cmd.Flags().StringVar(&routerAddr, FlagRouter, "", "Uniswap v4 swap router address from uni-init")
+	cmd.Flags().StringVar(&tokenAddr, FlagToken, "", "ERC20 address from uni-init")
+	return cmd
 }
 
 func simulatorInitCmd() *cobra.Command {
