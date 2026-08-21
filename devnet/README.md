@@ -12,6 +12,7 @@ Configure `example.env` (do not modify `.env` directly) and run `./clean.sh` to 
 | **Reth as RPC** | `RPC_TYPE=reth`<br>`LAUNCH_RPC_NODE=true`<br>`SKIP_OP_RETH_BUILD=false`<br>`OP_RETH_LOCAL_DIRECTORY=/absolute/path/to/reth/repository`<br>`OP_RETH_BRANCH=dev` |
 | **OP-Succinct Enabled** | `OP_SUCCINCT_ENABLE=true`<br>`OP_SUCCINCT_MOCK_MODE=true` (optional, for testing)<br>`OP_SUCCINCT_FAST_FINALITY_MODE=true` (optional, skip challenger) |
 | **Kailua Enabled** | `KAILUA_ENABLE=true`<br> `OWNER_TYPE=safe`<br> `KAILUA_MOCK_MODE=true` (optional, use RISC0_DEV_MODE)<br>`KAILUA_FAST_FINALITY_MODE=true` (optional, enable validity proofs) |
+| **RCS Enabled** | `SEQ_TYPE=reth`<br>`RCS_ENABLED=true`<br>`RCS_COUNT=1`<br>`RCS_LOCAL_DIRECTORY=/absolute/path/to/xlayer-rcs` |
 
 **Notes:**
 - Always modify `example.env`, then run `./clean.sh` to sync to `.env`
@@ -258,6 +259,33 @@ RPC_COUNT=1
 ```
 
 The cluster (seq + RPC identities, ports, and `docker-compose.cluster.yml`) is generated fresh by `scripts/generate-cluster.sh` every time `3-op-init.sh` runs — changing `SEQ_COUNT`/`RPC_COUNT` requires a `./clean.sh` before the next `./0-all.sh` run. Each RPC node's EL/rollup layers connect to the **entire** seq cluster (not just one node); its flashblocks subscription pairs 1:1 with one seq node (round-robin by index when `RPC_COUNT > SEQ_COUNT`).
+
+### 7. RCS Risk-Control Sidecars (Optional)
+
+`RCS_ENABLED=false` is the default and preserves the existing devnet topology. When enabled,
+the generator adds one TZMock service and `RCS_COUNT` RCS services. RCS requires Reth
+sequencers, and `RCS_COUNT` must not exceed the effective sequencer count.
+
+RCS instances are paired by index: RCS 1 filters sequencer 1, RCS 2 filters sequencer 2,
+and so on. A paired RCS reads from RPC node N when that RPC exists; otherwise it reads from
+sequencer N. Sequencers without a paired RCS keep the filter disabled. The bridge list in
+every generated RCS configuration is copied directly from `RCS_KNOWN_BRIDGE_ADDRESSES`,
+which must be a non-empty TOML array of quoted `0x` addresses.
+
+```bash
+RCS_ENABLED=true
+RCS_COUNT=3
+RCS_LOCAL_DIRECTORY=/absolute/path/to/xlayer-rcs
+RCS_KNOWN_BRIDGE_ADDRESSES='["0x14dC79964da2C08b23698B3D3cc7Ca32193d9955"]'
+
+# Set these to true only when the corresponding local image already exists.
+SKIP_RCS_BUILD=false
+SKIP_TZMOCK_BUILD=false
+```
+
+The generated host ports are `9500` for TZMock and `9195`, `9196`, ... for RCS. Runtime
+configuration is written under `config-op/rcs/`, while independent SQLite data is written
+under `data/rcs/`. Both are removed by `clean.sh`.
 
 `FLASHBLOCK_ENABLED=true` requires the selected Sequencer EL to be Reth. It
 also requires `RPC_TYPE=reth` when RPC nodes are actually launched; when the

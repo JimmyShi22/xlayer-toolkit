@@ -50,6 +50,7 @@ docker run --rm -v "$(pwd):/w" --entrypoint sh "$CLEAN_IMAGE" -c '
 echo " 🗑️  Removing generated files..."
 rm -rf data
 rm -rf config-op/cluster
+rm -rf config-op/rcs
 rm -rf docker-compose.cluster.yml
 rm -rf monitoring/prometheus.yml
 rm -rf config-op/genesis.json

@@ -4,6 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$REPO_DIR"
+# shellcheck source=scripts/lib/rcs-services.sh
+source "$SCRIPT_DIR/lib/rcs-services.sh"
 
 # --- Validate SEQ_COUNT ---
 SEQ_COUNT="${SEQ_COUNT:-3}"
@@ -66,6 +68,7 @@ if [ "$SEQ_CL" = "kona" ] && { [ "${CONDUCTOR_ENABLED:-false}" = "true" ] || [ "
     echo "❌ SEQ_CL=kona requires CONDUCTOR_ENABLED=false and one effective sequencer" >&2
     exit 1
 fi
+rcs_validate_settings "$N" "$SEQ_TYPE"
 
 # Reject impossible topologies before generating any cryptographic identity.
 # The highest preferred families are conductor consensus (50049 + seq index),
@@ -115,6 +118,7 @@ reserve_port_key() {
 for static_tcp_port in 3000 3500 4000 6060 8545 8546 8551 9000 9001 9090 18080 19090; do
     reserve_port_key "$static_tcp_port" tcp "docker-compose.yml"
 done
+rcs_reserve_host_ports "$N"
 
 # Set the named output variable to the first globally free port at or after
 # base+index. Using printf -v avoids command-substitution subshells, so every
@@ -509,6 +513,7 @@ fi
     echo "MEMPOOL_REBROADCASTER_GETH_ENDPOINT=$MEMPOOL_REBROADCASTER_GETH_ENDPOINT"
     echo "MEMPOOL_REBROADCASTER_RETH_ENDPOINT=$MEMPOOL_REBROADCASTER_RETH_ENDPOINT"
     echo "KONA_RPC_URLS=\"$KONA_RPC_URLS\""
+    rcs_emit_inventory "$N" "$RPC_N" "$RPC_TYPE" "$SEQ_TYPE"
     for ((i = 1; i <= N; i++)); do
         source "$CLUSTER_DIR/seq$i/identity.env"
         echo "EL_HTTP_PORT_$i=$EL_HTTP_PORT"

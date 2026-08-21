@@ -22,6 +22,7 @@ source config-op/cluster/cluster.env
 # Establish every selected EL container/DNS identity up front, but start only
 # Sequencer ELs until the Sequencer/Conductor cluster is active.
 "$SCRIPTS_DIR/start-cluster-services.sh" prepare
+"$SCRIPTS_DIR/start-cluster-services.sh" risk-control
 "$SCRIPTS_DIR/start-cluster-services.sh" seq-el
 
 if [ "$SEQ_TYPE" = "geth" ]; then

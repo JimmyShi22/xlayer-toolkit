@@ -7,6 +7,9 @@ set -e
 
 # Load environment variables
 source .env
+source config-op/cluster/cluster.env
+[ -n "${EL_HTTP_PORT_1:-}" ] || { echo "❌ Missing primary EL_HTTP_PORT_1 in generated cluster topology" >&2; exit 1; }
+L2_RPC_URL="http://localhost:${EL_HTTP_PORT_1}"
 
 SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/scripts" && pwd)"
 # shellcheck source=scripts/lib/op-succinct.sh
@@ -90,7 +93,10 @@ cast send "$ANCHOR_STATE_REGISTRY" "setRespectedGameType(uint32)" 42 --private-k
 TARGET_HEIGHT=$(cast call "$ANCHOR_STATE_REGISTRY" "getAnchorRoot()(bytes32,uint256)" --json | jq -r '.[1]')
 
 while true; do
-    CURRENT_HEIGHT=$(cast bn -r "$L2_RPC_URL" finalized 2>/dev/null || echo "0")
+    if ! CURRENT_HEIGHT=$(cast bn -r "$L2_RPC_URL" finalized); then
+        echo "❌ Failed to query finalized L2 height from $L2_RPC_URL" >&2
+        exit 1
+    fi
     if [ "$CURRENT_HEIGHT" -ge "$TARGET_HEIGHT" ]; then
         echo "✓ Finalized height reached: ${CURRENT_HEIGHT}"
         break

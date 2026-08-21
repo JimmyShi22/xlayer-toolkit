@@ -24,6 +24,7 @@ devnet/config-op/genesis.json
 devnet/config-op/genesis-reth.json
 devnet/config-op/genesis.json.gz
 devnet/config-op/cluster/
+devnet/config-op/rcs/
 devnet/docker-compose.cluster.yml
 devnet/monitoring/prometheus.yml
 devnet/config-op/gen.test.geth.rpc.config.toml
