@@ -9,8 +9,8 @@ source "$CLUSTER_ENV_PATH"
 
 START_PHASE="${1:-}"
 case "$START_PHASE" in
-    prepare|seq-el|seq-cl|conductors|activate|monitoring|rpc-el|rpc-cl) ;;
-    *) echo "❌ start phase must be prepare, seq-el, seq-cl, conductors, activate, monitoring, rpc-el, or rpc-cl" >&2; exit 1 ;;
+    prepare|risk-control|seq-el|seq-cl|conductors|activate|monitoring|rpc-el|rpc-cl) ;;
+    *) echo "❌ start phase must be prepare, risk-control, seq-el, seq-cl, conductors, activate, monitoring, rpc-el, or rpc-cl" >&2; exit 1 ;;
 esac
 
 [ -n "${SEQ_EL_SERVICES:-}" ] || { echo "❌ SEQ_EL_SERVICES is empty" >&2; exit 1; }
@@ -71,6 +71,51 @@ wait_for_cl_to_start() {
     return 1
 }
 
+wait_for_service_health() {
+    local service_name="$1"
+    local elapsed=0
+    local max_wait="${RCS_START_TIMEOUT_SECONDS:-120}"
+    local interval="${RCS_START_RETRY_SECONDS:-2}"
+    local status
+
+    echo "⏳ Waiting for risk-control service $service_name ..."
+    while [ "$elapsed" -lt "$max_wait" ]; do
+        status=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' \
+            "$service_name" 2>/dev/null || true)
+        case "$status" in
+            healthy|running)
+                echo "✅ $service_name is ready"
+                return 0
+                ;;
+        esac
+        sleep "$interval"
+        elapsed=$((elapsed + interval))
+    done
+    echo "❌ Timeout waiting for $service_name after ${max_wait}s (last status: ${status:-missing})" >&2
+    return 1
+}
+
+print_rcs_mapping() {
+    local i service_var seq_var endpoint_var port_var
+    local service seq_service endpoint host_port
+
+    for ((i = 1; i <= ${RCS_EFFECTIVE_COUNT:-0}; i++)); do
+        service_var="RCS_SERVICE_$i"
+        seq_var="RCS_SEQ_SERVICE_$i"
+        endpoint_var="RCS_L2_ENDPOINT_$i"
+        port_var="RCS_HOST_PORT_$i"
+        service="${!service_var:-}"
+        seq_service="${!seq_var:-}"
+        endpoint="${!endpoint_var:-}"
+        host_port="${!port_var:-}"
+        if [ -z "$service" ] || [ -z "$seq_service" ] || [ -z "$endpoint" ] || [ -z "$host_port" ]; then
+            echo "❌ Incomplete generated RCS mapping for index $i" >&2
+            return 1
+        fi
+        echo "🔗 RCS $service -> sequencer $seq_service -> L2 $endpoint -> host :$host_port"
+    done
+}
+
 wait_for_conductor_election() {
     local max_attempts="${CONDUCTOR_ELECTION_MAX_ATTEMPTS:-60}"
     local interval="${CONDUCTOR_ELECTION_RETRY_SECONDS:-2}"
@@ -128,6 +173,17 @@ case "$START_PHASE" in
         # Create every EL container/DNS name up front for strict peer lists,
         # without starting RPC ELs before the sequencer cluster is established.
         docker compose create $ALL_EL_SERVICES
+        ;;
+    risk-control)
+        if [ "${RCS_EFFECTIVE_COUNT:-0}" -gt 0 ]; then
+            [ -n "${TZMOCK_SERVICE:-}" ] || { echo "❌ TZMOCK_SERVICE is empty" >&2; exit 1; }
+            [ -n "${RCS_SERVICES:-}" ] || { echo "❌ RCS_SERVICES is empty" >&2; exit 1; }
+            print_rcs_mapping
+            docker compose up -d --build $TZMOCK_SERVICE $RCS_SERVICES
+            for service in $TZMOCK_SERVICE $RCS_SERVICES; do
+                wait_for_service_health "$service"
+            done
+        fi
         ;;
     seq-el)
         docker compose start $SEQ_EL_SERVICES

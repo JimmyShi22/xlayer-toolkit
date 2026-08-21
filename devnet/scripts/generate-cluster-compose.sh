@@ -4,6 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$REPO_DIR"
+# shellcheck source=scripts/lib/rcs-services.sh
+source "$SCRIPT_DIR/lib/rcs-services.sh"
 
 CLUSTER_DIR="$REPO_DIR/config-op/cluster"
 source "$CLUSTER_DIR/cluster.env"
@@ -45,6 +47,7 @@ for ((i = 1; i <= SEQ_EFFECTIVE_COUNT; i++)); do
 
     FB_KNOWN_PEERS=$(other_peers FB_PEER_ID op-reth-seq 9009 "$i")
     OPNODE_STATIC_PEERS=$(other_peers OPNODE_PEER_ID op-seq 9223 "$i")
+    RCS_ENV_YAML=$(rcs_seq_environment_yaml "$i")
 
     # --- Selected execution layer ---
     if [ "$SEQ_TYPE" = "geth" ]; then
@@ -114,6 +117,7 @@ EOF
 $([ "$i" -eq 1 ] && printf '      - "%s:7546"\n      - "%s:8552"\n      - "%s:9001" # metrics\n' "$EL_WS_HOST_PORT" "$EL_AUTHRPC_HOST_PORT" "$EL_METRICS_HOST_PORT")
     environment:
       - FB_KNOWN_PEERS=${FB_KNOWN_PEERS}
+$RCS_ENV_YAML
     healthcheck:
       test: [ "CMD", "curl", "-f", "-X", "POST", "-H", "Content-Type: application/json", "-d", "{\\"jsonrpc\\":\\"2.0\\",\\"method\\":\\"eth_blockNumber\\",\\"params\\":[],\\"id\\":1}", "http://localhost:8545" ]
       interval: 3s
@@ -471,6 +475,10 @@ EOF
 EOF
     fi
 done
+
+rcs_prepare_runtime_config "$REPO_DIR" "$RPC_EFFECTIVE_COUNT" \
+    "$RPC_TYPE_EFFECTIVE" "$SEQ_TYPE_EFFECTIVE"
+rcs_append_compose "$OUT" "$REPO_DIR"
 
 # Generate monitoring/prometheus.yml with one scrape target per selected Reth
 # EL node. Geth roles expose a different metrics interface and are omitted.
