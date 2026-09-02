@@ -308,12 +308,25 @@ EOF
     image: "${RCS_IMAGE_TAG:-xlayer-rcs:latest}"
     container_name: $service
 EOF
+        # Every RCS instance runs the same image tag, so only the first service
+        # declares a build; the image is built once and the remaining instances
+        # reuse it. To make that reuse work, the non-first instances pin
+        # pull_policy: never so Compose uses the locally built image instead of
+        # trying to pull the (registry-less) xlayer-rcs tag. Only applied when we
+        # build locally; with SKIP_RCS_BUILD=true the image is provided
+        # externally, so the default pull policy is left in place.
         if [ "${SKIP_RCS_BUILD:-false}" = false ]; then
-            cat >> "$compose_output" <<EOF
+            if [ "$i" -eq 1 ]; then
+                cat >> "$compose_output" <<EOF
     build:
       context: $source_dir
       dockerfile: $source_dir/Dockerfile
 EOF
+            else
+                cat >> "$compose_output" <<EOF
+    pull_policy: never
+EOF
+            fi
         fi
         cat >> "$compose_output" <<EOF
     command: ["/app/config.toml"]
