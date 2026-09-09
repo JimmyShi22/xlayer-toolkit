@@ -4,8 +4,14 @@ set -e
 
 ENV_FILE="${ENV_FILE:-/.env}"
 [ -f "$ENV_FILE" ] || { echo "Missing Reth environment file: $ENV_FILE" >&2; exit 1; }
+# Keep service-specific values injected by Docker Compose ahead of the shared
+# env file. In a multi-sequencer devnet each Reth instance has its own RCS.
+RCS_BASE_URL_OVERRIDE="${RCS_BASE_URL:-}"
 # shellcheck disable=SC1090
 source "$ENV_FILE"
+if [ -n "$RCS_BASE_URL_OVERRIDE" ]; then
+    export RCS_BASE_URL="$RCS_BASE_URL_OVERRIDE"
+fi
 
 # Each generated node has its own suffix and enode. Load it when the
 # entrypoint runs in a cluster, while keeping the single-node invocation
