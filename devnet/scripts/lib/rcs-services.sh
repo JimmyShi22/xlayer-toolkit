@@ -197,6 +197,9 @@ rcs_prepare_runtime_config() {
     start_height=$(( ${FORK_BLOCK:-0} + 1 ))
     rules_tmp=$(mktemp "$config_root/rules.json.tmp.XXXXXX") || return 1
     printf '%s\n' '{"rules":[]}' > "$rules_tmp"
+    # mktemp creates 0600 files; the RCS container runs as non-root UID 10001 and
+    # must be able to read the bind-mounted rules.json, so widen to 0644 before publishing.
+    chmod 0644 "$rules_tmp" || return 1
     mv "$rules_tmp" "$config_root/rules.json"
 
     for ((i = 1; i <= count; i++)); do
@@ -243,6 +246,9 @@ xlayer_audit_rpc_url = "$endpoint"
 signer_private_key_env = ""
 tx_blacklist_contract_address = ""
 EOF
+        # mktemp creates 0600 files; the RCS container runs as non-root UID 10001 and
+        # must be able to read the bind-mounted config.toml, so widen to 0644 before publishing.
+        chmod 0644 "$config_tmp" || return 1
         mv "$config_tmp" "$instance_dir/config.toml"
     done
 }
@@ -302,12 +308,25 @@ EOF
     image: "${RCS_IMAGE_TAG:-xlayer-rcs:latest}"
     container_name: $service
 EOF
+        # Every RCS instance runs the same image tag, so only the first service
+        # declares a build; the image is built once and the remaining instances
+        # reuse it. To make that reuse work, the non-first instances pin
+        # pull_policy: never so Compose uses the locally built image instead of
+        # trying to pull the (registry-less) xlayer-rcs tag. Only applied when we
+        # build locally; with SKIP_RCS_BUILD=true the image is provided
+        # externally, so the default pull policy is left in place.
         if [ "${SKIP_RCS_BUILD:-false}" = false ]; then
-            cat >> "$compose_output" <<EOF
+            if [ "$i" -eq 1 ]; then
+                cat >> "$compose_output" <<EOF
     build:
       context: $source_dir
       dockerfile: $source_dir/Dockerfile
 EOF
+            else
+                cat >> "$compose_output" <<EOF
+    pull_policy: never
+EOF
+            fi
         fi
         cat >> "$compose_output" <<EOF
     command: ["/app/config.toml"]
